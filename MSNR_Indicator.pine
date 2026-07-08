@@ -1,0 +1,212 @@
+//@version=5
+indicator("MSNR - Market StoryLine & Respect", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ================= INPUTS =================
+pivotLen      = input.int(5, "Pivot Lookback (bars each side)", minval=2, group="Zones")
+zoneWidthATR  = input.float(0.25, "Zone Width (x ATR)", minval=0.05, step=0.05, group="Zones")
+atrLen        = input.int(14, "ATR Length", group="Zones")
+maxZones      = input.int(15, "Max Zones to Track (each side)", minval=3, maxval=40, group="Zones")
+zoneExtendBars= input.int(50, "Zone Box Extend (bars)", minval=10, group="Zones")
+
+rr            = input.float(2.0, "Risk:Reward Ratio", minval=0.5, step=0.5, group="Signals")
+useEngulfing  = input.bool(true, "Require Engulfing Confirmation", group="Signals")
+respectStoryline = input.bool(true, "Only Signal With Storyline (no counter-trend)", group="Signals")
+
+showZones     = input.bool(true, "Show SNR Zones", group="Display")
+showStoryline = input.bool(true, "Show Storyline Label", group="Display")
+maxSignalLines= input.int(10, "Max Visible Signal Lines", minval=1, maxval=30, group="Display")
+
+// ================= CORE CALCS =================
+atr = ta.atr(atrLen)
+zoneHalfWidth = atr * zoneWidthATR
+
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+// ================= ZONE STORAGE =================
+var float[] resTop  = array.new_float(0)
+var float[] resBot  = array.new_float(0)
+var bool[]  resFresh= array.new_bool(0)
+var box[]   resBox  = array.new_box(0)
+
+var float[] supTop  = array.new_float(0)
+var float[] supBot  = array.new_float(0)
+var bool[]  supFresh= array.new_bool(0)
+var box[]   supBox  = array.new_box(0)
+
+addResZone(pivotPrice, pivotBar) =>
+    top = pivotPrice + zoneHalfWidth
+    bot = pivotPrice - zoneHalfWidth
+    array.unshift(resTop, top)
+    array.unshift(resBot, bot)
+    array.unshift(resFresh, true)
+    b = showZones ? box.new(pivotBar, top, bar_index + zoneExtendBars, bot, border_color=color.new(color.red, 40), bgcolor=color.new(color.red, 88), extend=extend.none) : na
+    array.unshift(resBox, b)
+    if array.size(resTop) > maxZones
+        array.pop(resTop)
+        array.pop(resBot)
+        array.pop(resFresh)
+        oldB = array.pop(resBox)
+        box.delete(oldB)
+
+addSupZone(pivotPrice, pivotBar) =>
+    top = pivotPrice + zoneHalfWidth
+    bot = pivotPrice - zoneHalfWidth
+    array.unshift(supTop, top)
+    array.unshift(supBot, bot)
+    array.unshift(supFresh, true)
+    b = showZones ? box.new(pivotBar, top, bar_index + zoneExtendBars, bot, border_color=color.new(color.green, 40), bgcolor=color.new(color.green, 88), extend=extend.none) : na
+    array.unshift(supBox, b)
+    if array.size(supTop) > maxZones
+        array.pop(supTop)
+        array.pop(supBot)
+        array.pop(supFresh)
+        oldB = array.pop(supBox)
+        box.delete(oldB)
+
+if not na(ph)
+    addResZone(ph, bar_index - pivotLen)
+if not na(pl)
+    addSupZone(pl, bar_index - pivotLen)
+
+// extend live boxes to the right as new bars print
+if showZones
+    for i = 0 to array.size(resBox) - 1
+        box.set_right(array.get(resBox, i), bar_index + zoneExtendBars)
+    for i = 0 to array.size(supBox) - 1
+        box.set_right(array.get(supBox, i), bar_index + zoneExtendBars)
+
+// ================= STORYLINE (trend bias from swing structure) =================
+var float lastPH = na
+var float prevPH = na
+var float lastPL = na
+var float prevPL = na
+
+if not na(ph)
+    prevPH := lastPH
+    lastPH := ph
+if not na(pl)
+    prevPL := lastPL
+    lastPL := pl
+
+storyline = "Neutral"
+if not na(lastPH) and not na(prevPH) and not na(lastPL) and not na(prevPL)
+    if lastPH > prevPH and lastPL > prevPL
+        storyline := "Bullish"
+    else if lastPH < prevPH and lastPL < prevPL
+        storyline := "Bearish"
+
+// ================= CANDLE CONFIRMATION =================
+bullishEngulf = close[1] < open[1] and close > open and open <= close[1] and close >= open[1]
+bearishEngulf = close[1] > open[1] and close < open and open >= close[1] and close <= open[1]
+
+// ================= SIGNAL DETECTION (checked BEFORE freshness is updated) =================
+var float buyEntry = na
+var float buySL = na
+var float buyTP = na
+var float sellEntry = na
+var float sellSL = na
+var float sellTP = na
+
+buySignal = false
+sellSignal = false
+
+if array.size(supTop) > 0
+    for i = 0 to array.size(supTop) - 1
+        top = array.get(supTop, i)
+        bot = array.get(supBot, i)
+        fresh = array.get(supFresh, i)
+        if fresh and low <= top and low >= bot and close > open
+            okStoryline = not respectStoryline or storyline != "Bearish"
+            okConfirm   = not useEngulfing or bullishEngulf
+            if okStoryline and okConfirm
+                buySignal := true
+                buyEntry := close
+                buySL := bot - zoneHalfWidth * 0.25
+                buyTP := buyEntry + (buyEntry - buySL) * rr
+                break
+
+if array.size(resTop) > 0
+    for i = 0 to array.size(resTop) - 1
+        top = array.get(resTop, i)
+        bot = array.get(resBot, i)
+        fresh = array.get(resFresh, i)
+        if fresh and high >= bot and high <= top and close < open
+            okStoryline = not respectStoryline or storyline != "Bullish"
+            okConfirm   = not useEngulfing or bearishEngulf
+            if okStoryline and okConfirm
+                sellSignal := true
+                sellEntry := close
+                sellSL := top + zoneHalfWidth * 0.25
+                sellTP := sellEntry - (sellSL - sellEntry) * rr
+                break
+
+// ================= UPDATE ZONE FRESHNESS / REMOVE BROKEN ZONES =================
+if array.size(resTop) > 0
+    for i = array.size(resTop) - 1 to 0
+        top = array.get(resTop, i)
+        bot = array.get(resBot, i)
+        if close > top
+            box.delete(array.get(resBox, i))
+            array.remove(resTop, i)
+            array.remove(resBot, i)
+            array.remove(resFresh, i)
+            array.remove(resBox, i)
+        else if high >= bot and array.get(resFresh, i)
+            array.set(resFresh, i, false)
+
+if array.size(supTop) > 0
+    for i = array.size(supTop) - 1 to 0
+        top = array.get(supTop, i)
+        bot = array.get(supBot, i)
+        if close < bot
+            box.delete(array.get(supBox, i))
+            array.remove(supTop, i)
+            array.remove(supBot, i)
+            array.remove(supFresh, i)
+            array.remove(supBox, i)
+        else if low <= top and array.get(supFresh, i)
+            array.set(supFresh, i, false)
+
+// ================= PLOT SIGNALS =================
+plotshape(buySignal, title="Buy Signal", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, text="BUY")
+plotshape(sellSignal, title="Sell Signal", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, text="SELL")
+
+// ================= ENTRY / SL / TP LINES =================
+var line[] sigLines = array.new_line(0)
+var label[] sigLabels = array.new_label(0)
+
+drawTrade(entry, sl, tp, isBuy) =>
+    slColor = color.new(color.red, 0)
+    tpColor = color.new(color.green, 0)
+    entryColor = color.new(color.gray, 0)
+    lEntry = line.new(bar_index, entry, bar_index + 15, entry, color=entryColor, style=line.style_dashed)
+    lSL    = line.new(bar_index, sl, bar_index + 15, sl, color=slColor, style=line.style_dashed)
+    lTP    = line.new(bar_index, tp, bar_index + 15, tp, color=tpColor, style=line.style_dashed)
+    lab    = label.new(bar_index + 15, entry, (isBuy ? "BUY\n" : "SELL\n") + "Entry: " + str.tostring(entry, format.mintick) + "\nSL: " + str.tostring(sl, format.mintick) + "\nTP: " + str.tostring(tp, format.mintick), style=isBuy ? label.style_label_left : label.style_label_left, color=isBuy ? color.new(color.green, 80) : color.new(color.red, 80), textcolor=color.white, size=size.small)
+    array.unshift(sigLines, lEntry)
+    array.unshift(sigLines, lSL)
+    array.unshift(sigLines, lTP)
+    array.unshift(sigLabels, lab)
+    if array.size(sigLabels) > maxSignalLines
+        array.pop(sigLabels) // oldest label falls off (delete not called to keep chart history visible; comment out next 4 lines if you want auto-cleanup)
+    if array.size(sigLines) > maxSignalLines * 3
+        line.delete(array.pop(sigLines))
+        line.delete(array.pop(sigLines))
+        line.delete(array.pop(sigLines))
+
+if buySignal
+    drawTrade(buyEntry, buySL, buyTP, true)
+if sellSignal
+    drawTrade(sellEntry, sellSL, sellTP, false)
+
+// ================= STORYLINE LABEL =================
+var label storyLabel = na
+if showStoryline
+    label.delete(storyLabel)
+    stColor = storyline == "Bullish" ? color.green : storyline == "Bearish" ? color.red : color.gray
+    storyLabel := label.new(bar_index, high + atr * 2, "Storyline: " + storyline, style=label.style_label_down, color=color.new(stColor, 70), textcolor=color.white, size=size.normal)
+
+// ================= ALERTS =================
+alertcondition(buySignal, title="MSNR Buy Signal", message="MSNR: Bullish signal at fresh support zone with storyline confirmation.")
+alertcondition(sellSignal, title="MSNR Sell Signal", message="MSNR: Bearish signal at fresh resistance zone with storyline confirmation.")
